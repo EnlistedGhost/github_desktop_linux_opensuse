@@ -2,6 +2,7 @@ import * as Path from 'path'
 import * as Fs from 'fs'
 
 import { getProductName, getVersion } from '../app/package-info'
+import { join } from 'path'
 
 const productName = getProductName()
 const version = getVersion()
@@ -25,7 +26,7 @@ export function getExecutableName() {
   if (process.platform === 'win32') {
     return `${getWindowsIdentifierName()}${suffix}`
   } else if (process.platform === 'linux') {
-    return `github-desktop${suffix}`
+    return 'desktop'
   } else {
     return productName
   }
@@ -112,16 +113,17 @@ export const isPublishable = () =>
 export const getChannel = () =>
   process.env.RELEASE_CHANNEL ?? process.env.NODE_ENV ?? 'development'
 
-export function getDistArchitecture(): 'arm64' | 'x64' | 'armv7l' {
+export function getDistArchitecture(): 'arm64' | 'x64' {
   // If a specific npm_config_arch is set, we use that one instead of the OS arch (to support cross compilation)
-  const arch = process.env.npm_config_arch || process.arch
-
-  if (arch === 'arm64' || arch === 'x64' || arch === 'armv7l') {
-    return arch
+  if (
+    process.env.npm_config_arch === 'arm64' ||
+    process.env.npm_config_arch === 'x64'
+  ) {
+    return process.env.npm_config_arch
   }
 
-  if (arch === 'arm') {
-    return 'armv7l'
+  if (process.arch === 'arm64') {
+    return 'arm64'
   }
 
   // TODO: Check if it's x64 running on an arm64 Windows with IsWow64Process2
@@ -148,9 +150,12 @@ export function shouldMakeDelta() {
   return ['production', 'beta'].includes(getChannel())
 }
 
-export function getIconFileName(): string {
-  const baseName = 'icon-logo'
-  return getChannel() === 'development' ? `${baseName}-yellow` : baseName
+/**
+ * Path to the directory containing all icon assets for the current release channel.
+ */
+export function getIconDirectory() {
+  const devOrProd = getChannel() === 'development' ? 'dev' : 'prod'
+  return join(projectRoot, 'app', 'static', 'logos', devOrProd)
 }
 
 export function getChannelFromReleaseBranch(): string {

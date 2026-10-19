@@ -69,11 +69,16 @@ export class AddExistingRepository extends React.Component<
   private onTrustDirectory = async () => {
     this.setState({ isTrustingRepository: true })
     const { repositoryUnsafePath, path } = this.state
-    if (repositoryUnsafePath) {
-      await addSafeDirectory(repositoryUnsafePath)
+    try {
+      if (repositoryUnsafePath) {
+        await addSafeDirectory(repositoryUnsafePath)
+      }
+      await this.validatePath(path)
+    } catch (error) {
+      this.props.dispatcher.postError(error)
+    } finally {
+      this.setState({ isTrustingRepository: false })
     }
-    await this.validatePath(path)
-    this.setState({ isTrustingRepository: false })
   }
 
   private async updatePath(path: string) {
@@ -253,21 +258,9 @@ export class AddExistingRepository extends React.Component<
   }
 
   private onPathChanged = async (path: string) => {
-    const type = await getRepositoryType(this.resolvedPath(path))
-
-    const isRepository = type.kind !== 'missing' && type.kind !== 'unsafe'
-    const isRepositoryUnsafe = type.kind === 'unsafe'
-    const isRepositoryBare = type.kind === 'bare'
-    const showNonGitRepositoryWarning = !isRepository || isRepositoryBare
-    const repositoryUnsafePath = type.kind === 'unsafe' ? type.path : undefined
-
-    this.setState({
-      path,
-      isRepositoryUnsafe,
-      isRepositoryBare,
-      showNonGitRepositoryWarning,
-      repositoryUnsafePath,
-    })
+    if (this.state.path !== path) {
+      this.updatePath(path)
+    }
   }
 
   private showFilePicker = async () => {

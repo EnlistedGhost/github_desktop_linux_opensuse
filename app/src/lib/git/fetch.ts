@@ -2,7 +2,6 @@ import { git, IGitStringExecutionOptions } from './core'
 import { Repository } from '../../models/repository'
 import { IFetchProgress } from '../../models/progress'
 import { FetchProgressParser, executionOptionsWithProgress } from '../progress'
-import { enableRecurseSubmodulesFlag } from '../feature-flag'
 import { IRemote } from '../../models/remote'
 import { ITrackingBranch } from '../../models/branch'
 import { envForRemoteOperation } from './environment'
@@ -15,9 +14,8 @@ async function getFetchArgs(
     'fetch',
     ...(progressCallback ? ['--progress'] : []),
     '--prune',
-    ...(enableRecurseSubmodulesFlag()
-      ? ['--recurse-submodules=on-demand']
-      : []),
+    '--recurse-submodules=on-demand',
+    '--',
     remote,
   ]
 }
@@ -97,10 +95,15 @@ export async function fetchRefspec(
   remote: IRemote,
   refspec: string
 ): Promise<void> {
-  await git(['fetch', remote.name, refspec], repository.path, 'fetchRefspec', {
-    successExitCodes: new Set([0, 128]),
-    env: await envForRemoteOperation(remote.url),
-  })
+  await git(
+    ['fetch', '--', remote.name, refspec],
+    repository.path,
+    'fetchRefspec',
+    {
+      successExitCodes: new Set([0, 128]),
+      env: await envForRemoteOperation(remote.url),
+    }
+  )
 }
 
 export async function fastForwardBranches(

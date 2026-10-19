@@ -1,5 +1,8 @@
 import { trampolineServer } from './trampoline-server'
-import { withTrampolineToken } from './trampoline-tokens'
+import {
+  isValidTrampolineToken,
+  withTrampolineToken,
+} from './trampoline-tokens'
 import * as Path from 'path'
 import { getSSHEnvironment } from '../ssh/ssh'
 import {
@@ -8,7 +11,6 @@ import {
 } from '../ssh/ssh-credential-storage'
 import { GitError as DugiteError, exec } from 'dugite'
 import memoizeOne from 'memoize-one'
-import { enableGitConfigParameters } from '../feature-flag'
 import { GitError, getDescriptionForError } from '../git/core'
 import { getDesktopAskpassTrampolineFilename } from 'desktop-trampoline'
 
@@ -35,6 +37,28 @@ export const getHasRejectedCredentialsForEndpoint = (
     false
   )
 }
+const credentialLeases = new Map<string, Array<() => void>>()
+
+/**
+ * Hold a credential lease until the Git process using this trampoline token
+ * exits. Releases it right away if that process has already finished.
+ */
+export const holdCredentialLease = (
+  trampolineToken: string,
+  release: () => void
+) => {
+  if (!isValidTrampolineToken(trampolineToken)) {
+    release()
+    return
+  }
+  const leases = credentialLeases.get(trampolineToken)
+  if (leases) {
+    leases.push(release)
+  } else {
+    credentialLeases.set(trampolineToken, [release])
+  }
+}
+
 const isBackgroundTaskEnvironment = new Map<string, boolean>()
 const trampolineEnvironmentPath = new Map<string, string>()
 
@@ -141,17 +165,8 @@ export async function withTrampolineEnv<T>(
         //
         // See https://github.com/desktop/desktop/issues/18945
         // See https://github.com/git/git/blob/ed155187b429a/config.c#L664
-        ...(enableGitConfigParameters()
-          ? {
-              GIT_CONFIG_PARAMETERS: `${gitEnvConfigPrefix}'credential.helper=' 'credential.helper=desktop'`,
-            }
-          : {
-              GIT_CONFIG_COUNT: '2',
-              GIT_CONFIG_KEY_0: 'credential.helper',
-              GIT_CONFIG_VALUE_0: '',
-              GIT_CONFIG_KEY_1: 'credential.helper',
-              GIT_CONFIG_VALUE_1: 'desktop',
-            }),
+        GIT_CONFIG_PARAMETERS: `${gitEnvConfigPrefix}'credential.helper=' 'credential.helper=desktop'`,
+
         GIT_USER_AGENT: await GitUserAgent(),
         ...sshEnv,
       })
@@ -186,13 +201,15 @@ export async function withTrampolineEnv<T>(
         e instanceof GitError &&
         fatalPromptsDisabledRe.test(e.message)
       ) {
+        const msg = 'Authentication failed: user cancelled authentication'
         const gitErrorDescription =
           getDescriptionForError(DugiteError.HTTPSAuthenticationFailed, '') ??
-          'Authentication failed: user cancelled authentication'
+          msg
 
         const fakeAuthError = new GitError(
           { ...e.result, gitErrorDescription },
-          e.args
+          e.args,
+          msg
         )
 
         fakeAuthError.cause = e
@@ -202,6 +219,8 @@ export async function withTrampolineEnv<T>(
       throw e
     } finally {
       removeMostRecentSSHCredential(token)
+      credentialLeases.get(token)?.forEach(release => release())
+      credentialLeases.delete(token)
       isBackgroundTaskEnvironment.delete(token)
       hasRejectedCredentialsForEndpoint.delete(token)
       trampolineEnvironmentPath.delete(token)

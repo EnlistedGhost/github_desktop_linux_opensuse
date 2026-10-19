@@ -4,13 +4,14 @@ import {
   app,
   Menu,
   BrowserWindow,
+  clipboard,
+  dialog,
   shell,
   session,
   systemPreferences,
   nativeTheme,
 } from 'electron'
 import * as Fs from 'fs'
-import * as URL from 'url'
 
 import { AppWindow } from './app-window'
 import { buildDefaultMenu, getAllMenuItems } from './menu'
@@ -35,6 +36,7 @@ import { showUncaughtException } from './show-uncaught-exception'
 import { buildContextMenu } from './menu/build-context-menu'
 import { OrderedWebRequest } from './ordered-webrequest'
 import { installAuthenticatedImageFilter } from './authenticated-image-filter'
+import { createAuthenticatedImageTokenResolver } from './authenticated-image-token-resolver'
 import { installAliveOriginFilter } from './alive-origin-filter'
 import { installSameOriginFilter } from './same-origin-filter'
 import * as ipcMain from './ipc-main'
@@ -45,15 +47,13 @@ import {
 import { buildSpellCheckMenu } from './menu/build-spell-check-menu'
 import { getMainGUID, saveGUIDFile } from '../lib/get-main-guid'
 import {
-  readTitleBarConfigFileSync,
-  saveTitleBarConfigFile,
-} from '../lib/get-title-bar-config'
-import {
   getNotificationsPermission,
   requestNotificationsPermission,
   showNotification,
 } from 'desktop-notifications'
 import { initializeDesktopNotifications } from './notifications'
+import parseCommandLineArgs from 'minimist'
+import { CLIAction } from '../lib/cli-action'
 
 app.setAppLogsPath()
 enableSourceMaps()
@@ -106,7 +106,7 @@ function getExtraErrorContext(): Record<string, string> {
 const protocolLauncherArg = '--protocol-launcher'
 
 const possibleProtocols = new Set(['x-github-client'])
-if (__DEV__) {
+if (__DEV_SECRETS__) {
   possibleProtocols.add('x-github-desktop-dev-auth')
 } else {
   possibleProtocols.add('x-github-desktop-auth')
@@ -143,24 +143,18 @@ process.on('uncaughtException', (error: Error) => {
 let handlingSquirrelEvent = false
 if (__WIN32__ && process.argv.length > 1) {
   const arg = process.argv[1]
-
   const promise = handleSquirrelEvent(arg)
+
   if (promise) {
     handlingSquirrelEvent = true
     promise
-      .catch(e => {
-        log.error(`Failed handling Squirrel event: ${arg}`, e)
-      })
-      .then(() => {
-        app.quit()
-      })
-  } else {
-    handlePossibleProtocolLauncherArgs(process.argv)
+      .catch(e => log.error(`Failed handling Squirrel event: ${arg}`, e))
+      .then(() => app.quit())
   }
 }
 
-if (__LINUX__ && process.argv.length > 1) {
-  handlePossibleProtocolLauncherArgs(process.argv)
+if (!handlingSquirrelEvent) {
+  handleCommandLineArguments(process.argv)
 }
 
 initializeDesktopNotifications()
@@ -198,7 +192,7 @@ if (!handlingSquirrelEvent) {
       mainWindow.focus()
     }
 
-    handlePossibleProtocolLauncherArgs(args)
+    handleCommandLineArguments(args)
   })
 
   if (isDuplicateInstance) {
@@ -237,63 +231,78 @@ if (__DARWIN__) {
         return
       }
 
-      handleAppURL(
-        `x-github-client://openLocalRepo/${encodeURIComponent(path)}`
-      )
+      // Yeah this isn't technically a CLI action we use it here to indicate
+      // that it's more trusted than a URL action.
+      handleCLIAction({ kind: 'open-repository', path })
     })
   })
 }
 
-/**
- * Attempt to detect and handle any protocol handler arguments passed
- * either via the command line directly to the current process or through
- * IPC from a duplicate instance (see makeSingleInstance)
- *
- * @param args Essentially process.argv, i.e. the first element is the exec
- *             path
- */
-function handlePossibleProtocolLauncherArgs(args: ReadonlyArray<string>) {
-  log.info(`Received possible protocol arguments: ${args.length}`)
+async function handleCommandLineArguments(argv: string[]) {
+  const args = parseCommandLineArgs(argv, {
+    boolean: ['protocol-launcher'],
+  })
 
-  if (__WIN32__) {
-    // Desktop registers it's protocol handler callback on Windows as
-    // `[executable path] --protocol-launcher "%1"`. Note that extra command
-    // line arguments might be added by Chromium
-    // (https://electronjs.org/docs/api/app#event-second-instance).
-    // At launch Desktop checks for that exact scenario here before doing any
-    // processing. If there's more than one matching url argument because of a
-    // malformed or untrusted url then we bail out.
+  // Desktop registers it's protocol handler callback on Windows as
+  // `[executable path] --protocol-launcher "%1"`. Note that extra command
+  // line arguments might be added by Chromium
+  // (https://electronjs.org/docs/api/app#event-second-instance).
 
-    const matchingUrls = args.filter(arg => {
-      // sometimes `URL.parse` throws an error
-      try {
-        const url = URL.parse(arg)
-        // i think this `slice` is just removing a trailing `:`
-        return url.protocol && possibleProtocols.has(url.protocol.slice(0, -1))
-      } catch (e) {
-        log.error(`Unable to parse argument as URL: ${arg}`)
-        return false
+  if (__WIN32__ && args['protocol-launcher'] === true) {
+    // On Windows we'll end up getting called with something like
+    // `--protocol-launcher --allow-file-access-from-files x-github-client://..`
+    // which minimist naturally interprets as
+    // `--allow-file-access-from-files=x:/github-client`. This is due to
+    // Chromium's hot take on parsing command line arguments, see:
+    // https://github.com/electron/electron/issues/20322#issuecomment-534137321
+    // So while we could add '--allow-file...' as a boolean we can't know for
+    // sure that Chromium won't add more switches later on which is why we have
+    // to resort to looking through all arguments looking for something that
+    // appears to be an app url.
+    const prefixes = Array.from(possibleProtocols, p => `${p}://`)
+    const matchingUrl = argv.find(arg => {
+      if (prefixes.some(p => arg.startsWith(p))) {
+        try {
+          new URL(arg)
+          return true
+        } catch {
+          log.error(`Unable to parse argument as URL: ${arg}`)
+        }
       }
+      return false
     })
 
-    if (args.includes(protocolLauncherArg) && matchingUrls.length === 1) {
-      handleAppURL(matchingUrls[0])
+    if (matchingUrl) {
+      handleAppURL(matchingUrl)
     } else {
-      log.error(`Malformed launch arguments received: ${args}`)
+      log.error(`Encountered --protocol-launcher without app url`)
     }
-  } else if (__LINUX__) {
-    // we expect this call to have several parameters before the URL we want,
-    // so we should filter out the program name as well as any parameters that
-    // look like arguments to Electron
-    const argsWithoutParameters = args.filter(
-      a => !a.endsWith('github-desktop') && !a.startsWith('--')
-    )
-    if (argsWithoutParameters.length > 0) {
-      handleAppURL(argsWithoutParameters[0])
-    }
-  } else if (args.length > 1) {
-    handleAppURL(args[1])
+    // If --protocol-launcher is present we always want to bail and not
+    // risk a smuggled cli switch
+    return
   }
+
+  if (typeof args['cli-open'] === 'string') {
+    handleCLIAction({ kind: 'open-repository', path: args['cli-open'] })
+  } else if (typeof args['cli-clone'] === 'string') {
+    handleCLIAction({
+      kind: 'clone-url',
+      url: args['cli-clone'],
+      branch:
+        typeof args['cli-branch'] === 'string' ? args['cli-branch'] : undefined,
+    })
+  }
+
+  return
+}
+
+function handleCLIAction(action: CLIAction) {
+  onDidLoad(window => {
+    // This manual focus call _shouldn't_ be necessary, but is for Chrome on
+    // macOS. See https://github.com/desktop/desktop/issues/973.
+    window.focus()
+    window.sendCLIAction(action)
+  })
 }
 
 /**
@@ -341,7 +350,13 @@ app.on('ready', () => {
 
   // Adds an authorization header for requests of avatars on GHES and private
   // repo assets
-  const updateAccounts = installAuthenticatedImageFilter(orderedWebRequest)
+  const imageTokenResolver = createAuthenticatedImageTokenResolver(
+    () => mainWindow?.webContents
+  )
+  const updateAccounts = installAuthenticatedImageFilter(
+    orderedWebRequest,
+    imageTokenResolver.resolveToken
+  )
 
   Menu.setApplicationMenu(
     buildDefaultMenu({
@@ -352,7 +367,16 @@ app.on('ready', () => {
     })
   )
 
-  ipcMain.on('update-accounts', (_, accounts) => updateAccounts(accounts))
+  ipcMain.on('update-accounts', (event, accounts) => {
+    if (event.sender !== mainWindow?.webContents) {
+      return
+    }
+    imageTokenResolver.updateAccounts(accounts)
+    updateAccounts(accounts)
+  })
+  ipcMain.on('resolved-image-token', (event, requestId, token) => {
+    imageTokenResolver.acceptResponse(event.sender, requestId, token)
+  })
 
   ipcMain.on('update-preferred-app-menu-item-labels', (_, labels) => {
     // The current application menu is mutable and we frequently
@@ -505,6 +529,10 @@ app.on('ready', () => {
     })
   })
 
+  ipcMain.handle('write-clipboard-text', async (_, text) =>
+    clipboard.writeText(text)
+  )
+
   ipcMain.handle('check-for-updates', async (_, url) =>
     mainWindow?.checkForUpdates(url)
   )
@@ -512,11 +540,6 @@ app.on('ready', () => {
   ipcMain.on('quit-and-install-updates', () =>
     mainWindow?.quitAndInstallUpdate()
   )
-
-  ipcMain.on('restart-app', () => {
-    app.relaunch()
-    app.exit()
-  })
 
   ipcMain.on('quit-app', () => app.quit())
 
@@ -611,6 +634,11 @@ app.on('ready', () => {
   ipcMain.handle('get-app-path', async () => app.getAppPath())
 
   /**
+   * An event sent by the renderer asking for the executable path
+   */
+  ipcMain.handle('get-exec-path', async () => process.execPath)
+
+  /**
    * An event sent by the renderer asking for whether the app is running under
    * rosetta translation
    */
@@ -630,6 +658,26 @@ app.on('ready', () => {
   ipcMain.handle('show-item-in-folder', async (_, path) =>
     shell.showItemInFolder(path)
   )
+  ipcMain.handle('confirm-reveal-directory', async event => {
+    const window = BrowserWindow.fromWebContents(event.sender)
+    const options: Electron.MessageBoxOptions = {
+      type: 'warning',
+      title: 'Reveal Repository in Finder?',
+      message: 'This repository might be an application.',
+      detail:
+        'Opening it directly could run software. You can reveal and select it in Finder without opening it.',
+      buttons: ['Reveal in Finder', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    }
+    const result =
+      window === null
+        ? await dialog.showMessageBox(options)
+        : await dialog.showMessageBox(window, options)
+
+    return result.response === 0
+  })
 
   ipcMain.on('unsafe-open-directory', async (_, path) =>
     UNSAFE_openDirectory(path)
@@ -706,16 +754,6 @@ app.on('ready', () => {
 
   ipcMain.handle('save-guid', (_, guid) => saveGUIDFile(guid))
 
-  ipcMain.handle(
-    'get-title-bar-style',
-    async () => readTitleBarConfigFileSync().titleBarStyle
-  )
-
-  ipcMain.handle(
-    'save-title-bar-style',
-    async (_, titleBarStyle) => await saveTitleBarConfigFile({ titleBarStyle })
-  )
-
   ipcMain.handle('show-notification', async (_, title, body, userInfo) =>
     showNotification(title, body, userInfo)
   )
@@ -768,25 +806,19 @@ function createWindow() {
       REACT_DEVELOPER_TOOLS,
     } = require('electron-devtools-installer')
 
-    const ChromeLens = {
-      id: 'idikgljglpfilbhaboonnpnnincjhjkd',
-      electron: '>=1.2.1',
-    }
-
     const axeDevTools = {
       id: 'lhdoppojpmngadmnindnejefpokejbdd',
-      electron: '>=1.2.1',
-      Permissions: ['tabs', 'debugger'],
     }
 
-    const extensions = [REACT_DEVELOPER_TOOLS, ChromeLens, axeDevTools]
+    const extensions = [REACT_DEVELOPER_TOOLS, axeDevTools]
 
-    for (const extension of extensions) {
-      try {
-        installExtension(extension, {
-          loadExtensionOptions: { allowFileAccess: true },
-        })
-      } catch (e) {}
+    try {
+      installExtension(extensions, {
+        loadExtensionOptions: { allowFileAccess: true },
+      })
+      console.log('Added Extensions: "React Developer Tools", "axe DevTools"')
+    } catch (e) {
+      console.log('An error occurred while loading extensions: ', e)
     }
   }
 

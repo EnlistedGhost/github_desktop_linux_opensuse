@@ -1,3 +1,5 @@
+import { describe, it } from 'node:test'
+import assert from 'node:assert'
 import {
   abortMerge,
   getMergeBase,
@@ -12,35 +14,56 @@ import {
 } from '../../helpers/repositories'
 import { exec } from 'dugite'
 import { Repository } from '../../../src/models/repository'
+import { git } from '../../../src/lib/git/core'
 
 describe('git/merge', () => {
   describe('merge', () => {
     describe('and is successful', () => {
-      let repository: Repository
-      beforeEach(async () => {
-        const path = await setupFixtureRepository('merge-base-test')
-        repository = new Repository(path, -1, null, false)
-      })
-      it('returns MergeResult.Success', async () => {
-        expect(await merge(repository, 'dev')).toBe(MergeResult.Success)
+      it('returns MergeResult.Success', async t => {
+        const path = await setupFixtureRepository(t, 'merge-base-test')
+        const repository = new Repository(path, -1, null, false)
+        assert.equal(await merge(repository, 'dev'), MergeResult.Success)
       })
     })
     describe('and is a noop', () => {
-      let repository: Repository
-      beforeEach(async () => {
-        const path = await setupFixtureRepository('merge-base-test')
-        repository = new Repository(path, -1, null, false)
+      it('returns MergeResult.AlreadyUpToDate', async t => {
+        const path = await setupFixtureRepository(t, 'merge-base-test')
+        const repository = new Repository(path, -1, null, false)
         await merge(repository, 'dev')
-      })
-      it('returns MergeResult.AlreadyUpToDate', async () => {
-        expect(await merge(repository, 'dev')).toBe(MergeResult.AlreadyUpToDate)
+        assert.equal(
+          await merge(repository, 'dev'),
+          MergeResult.AlreadyUpToDate
+        )
       })
     })
   })
 
   describe('getMergeBase', () => {
-    it('returns the common ancestor of two branches', async () => {
-      const path = await setupFixtureRepository('merge-base-test')
+    for (const remoteName of ['-remote', '--remote']) {
+      it(`accepts a ${remoteName} tracking ref in either argument position`, async t => {
+        const path = await setupFixtureRepository(t, 'merge-base-test')
+        const repository = new Repository(path, -1, null, false)
+        const upstream = `${remoteName}/dev`
+        await git(
+          ['update-ref', `refs/remotes/${upstream}`, 'dev'],
+          repository.path,
+          'create remote-tracking ref'
+        )
+
+        const expected = 'df0d73dc92ff496c6a61f10843d527b7461703f4'
+        assert.strictEqual(
+          await getMergeBase(repository, 'master', upstream),
+          expected
+        )
+        assert.strictEqual(
+          await getMergeBase(repository, upstream, 'master'),
+          expected
+        )
+      })
+    }
+
+    it('returns the common ancestor of two branches', async t => {
+      const path = await setupFixtureRepository(t, 'merge-base-test')
       const repository = new Repository(path, -1, null, false)
 
       const allBranches = await getBranches(repository)
@@ -55,11 +78,11 @@ describe('git/merge', () => {
       }
 
       const ref = await getMergeBase(repository, first.tip.sha, second.tip.sha)
-      expect(ref).toEqual('df0d73dc92ff496c6a61f10843d527b7461703f4')
+      assert.equal(ref, 'df0d73dc92ff496c6a61f10843d527b7461703f4')
     })
 
-    it('returns null when the branches do not have a common ancestor', async () => {
-      const repository = await setupEmptyRepository()
+    it('returns null when the branches do not have a common ancestor', async t => {
+      const repository = await setupEmptyRepository(t)
 
       const firstBranch = 'master'
       const secondBranch = 'gh-pages'
@@ -91,11 +114,11 @@ describe('git/merge', () => {
       }
 
       const ref = await getMergeBase(repository, first.tip.sha, second.tip.sha)
-      expect(ref).toBeNull()
+      assert(ref === null)
     })
 
-    it('returns null when a ref cannot be found', async () => {
-      const repository = await setupEmptyRepository()
+    it('returns null when a ref cannot be found', async t => {
+      const repository = await setupEmptyRepository(t)
 
       // create the first commit
       await exec(
@@ -108,28 +131,23 @@ describe('git/merge', () => {
         'master',
         'origin/some-unknown-branch'
       )
-      expect(ref).toBeNull()
+      assert(ref === null)
     })
   })
   describe('abortMerge', () => {
-    let repository: Repository
-    const subject = () => abortMerge(repository)
     describe('when there is no in-progress merge', () => {
-      beforeEach(async () => {
-        repository = await setupEmptyRepository()
-      })
-      it('throws an error', async () => {
-        await expect(subject()).rejects.toThrow(
+      it('throws an error', async t => {
+        const repository = await setupEmptyRepository(t)
+        await assert.rejects(
+          () => abortMerge(repository),
           /There is no merge in progress, so there is nothing to abort/
         )
       })
     })
     describe('in the middle of resolving conflicts merge', () => {
-      beforeEach(async () => {
-        repository = await setupConflictedRepo()
-      })
-      it('aborts the merge', async () => {
-        await expect(subject()).resolves.not.toThrow()
+      it('aborts the merge', async t => {
+        const repository = await setupConflictedRepo(t)
+        await assert.doesNotReject(() => abortMerge(repository))
       })
     })
   })

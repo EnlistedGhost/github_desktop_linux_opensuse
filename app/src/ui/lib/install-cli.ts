@@ -1,6 +1,6 @@
 import * as Path from 'path'
 
-import * as fsAdmin from 'fs-admin-forked'
+import * as fsAdmin from 'fs-admin'
 import { mkdir, readlink, symlink, unlink } from 'fs/promises'
 
 /** The path for the installed command line tool. */
@@ -18,7 +18,7 @@ export async function installCLI(): Promise<void> {
 
   try {
     await symlinkCLI(false)
-  } catch (e) {
+  } catch {
     // If we error without running as an admin, try again as an admin.
     await symlinkCLI(true)
   }

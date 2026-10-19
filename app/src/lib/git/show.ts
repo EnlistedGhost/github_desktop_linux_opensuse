@@ -1,7 +1,25 @@
-import { coerceToBuffer, git, isMaxBufferExceededError } from './core'
+import { git, isMaxBufferExceededError } from './core'
 
 import { Repository } from '../../models/repository'
 import { GitError } from 'dugite'
+import { coerceToBuffer } from './coerce-to-buffer'
+
+/**
+ * Resolve leading-dash revisions before appending a path so Git can report a
+ * missing path instead of treating the unresolved revision:path as an option.
+ */
+async function resolveBlobRevision(repository: Repository, commitish: string) {
+  if (!commitish.startsWith('-')) {
+    return commitish
+  }
+
+  const result = await git(
+    ['rev-parse', '--verify', '--end-of-options', commitish],
+    repository.path,
+    'resolveBlobRevision'
+  )
+  return result.stdout.trim()
+}
 
 /**
  * Retrieve the binary contents of a blob from the repository at a given
@@ -19,15 +37,22 @@ import { GitError } from 'dugite'
  * @param path       - The file path, relative to the repository
  *                     root from where to read the blob contents
  */
-export const getBlobContents = (
+export const getBlobContents = async (
   repository: Repository,
   commitish: string,
   path: string
-) =>
-  git(['show', `${commitish}:${path}`], repository.path, 'getBlobContents', {
-    successExitCodes: new Set([0, 1]),
-    encoding: 'buffer',
-  }).then(r => r.stdout)
+) => {
+  const revision = await resolveBlobRevision(repository, commitish)
+  return git(
+    ['show', `${revision}:${path}`],
+    repository.path,
+    'getBlobContents',
+    {
+      successExitCodes: new Set([0, 1]),
+      encoding: 'buffer',
+    }
+  ).then(r => r.stdout)
+}
 
 /**
  * Retrieve some or all binary contents of a blob from the repository
@@ -71,7 +96,8 @@ export async function getPartialBlobContentsCatchPathNotInRef(
   path: string,
   length: number
 ): Promise<Buffer | null> {
-  const args = ['show', `${commitish}:${path}`]
+  const revision = await resolveBlobRevision(repository, commitish)
+  const args = ['show', `${revision}:${path}`]
 
   return git(args, repository.path, 'getPartialBlobContentsCatchPathNotInRef', {
     maxBuffer: length,
